@@ -11,19 +11,15 @@
 #include <iostream>
 #include <ranges>
 #include <string>
-#include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <string_view>
 
 #include <robin_hood.h>
 
 #include <sharg/parser.hpp>
 
-#if defined(__GNUC__) && !defined(__llvm__) && !defined(__INTEL_COMPILER) && (__GNUC__ < 12)
-#    define RAPTOR_IS_GCC12 0
-#else
-#    define RAPTOR_IS_GCC12 1
-#endif
+// #include <seqan3/std/algorithm>
 
 struct parser_options
 {
@@ -39,33 +35,46 @@ void init_parser(sharg::parser & parser, parser_options & options)
     parser.add_option(options.result_file,
                       sharg::config{.short_id = '\0',
                                     .long_id = "results",
-                                    .description = "The result file of a tool. Tool is selected by --result-format.",
+                                    .description = "The result file of a tool. Which tool is chosen by --result-format",
                                     .required = true,
                                     .validator = sharg::input_file_validator{}});
     parser.add_option(options.truth_file,
                       sharg::config{.short_id = '\0',
                                     .long_id = "truth",
-                                    .description = "The ground truth to compare with.",
+                                    .description = "The ground truth to compare against.",
                                     .required = true,
                                     .validator = sharg::input_file_validator{}});
-    parser.add_option(
-        options.result_format,
-        sharg::config{.short_id = '\0',
-                      .long_id = "result-format",
-                      .description = "The format of the result file.",
-                      .required = true,
-                      .validator = sharg::value_list_validator{"raptor", "mantis", "bifrost", "metagraph", "cobs"}});
+    parser.add_option(options.result_format,
+                      sharg::config{.short_id = '\0',
+                                    .long_id = "result-format",
+                                    .description = "The format of the result file.",
+                                    .required = true,
+                                    .validator = sharg::value_list_validator{"raptor", "mantis", "bifrost", "metagraph", "cobs"}});
     parser.add_option(options.mantis_query_names,
                       sharg::config{.short_id = '\0',
                                     .long_id = "mantis-query-names",
-                                    .description = "If the format is mantis, the query ids are needed, in the same "
-                                                   "order as the query file given to mantis when querying."});
-    parser.add_option(
-        options.mantis_threshold,
-        sharg::config{.short_id = '\0',
-                      .long_id = "mantis-threshold",
-                      .description =
-                          "If the format is mantis, the threshold given to all others tools when querying needed."});
+                                    .description = "If the format is mantis, the query ids are needed, in the same order as the query file given to mantis when querying."});
+    parser.add_option(options.mantis_threshold,
+                      sharg::config{.short_id = '\0',
+                                    .long_id = "mantis-threshold",
+                                    .description = "If the format is mantis, the threshold given to all others tools when querying needed."});
+}
+
+void print_progress(double const query_count, double const number_of_querries)
+{
+    int const barWidth = 70;
+    double const progress = query_count / number_of_querries;
+
+    std::cout << "[";
+    int const pos = barWidth * progress;
+    for (int i = 0; i < barWidth; ++i)
+    {
+        if (i < pos) std::cout << "=";
+        else if (i == pos) std::cout << ">";
+        else std::cout << " ";
+    }
+    std::cout << "] " << int(progress * 100.0) << " %\r";
+    std::cout.flush();
 }
 
 auto create_truth_maps(std::filesystem::path const truth_file)
@@ -81,8 +90,9 @@ auto create_truth_maps(std::filesystem::path const truth_file)
 
     // Header contains lines: "some_number <tab> reference_name"
     std::cout << "[Truth] Parse header ..." << std::endl;
-    while (std::getline(truth_file_in, line_buffer) && line_buffer.starts_with("#")
-           && !line_buffer.starts_with("#QUERY_NAME"))
+    while (std::getline(truth_file_in, line_buffer)  &&
+           line_buffer.starts_with("#") &&
+           !line_buffer.starts_with("#QUERY_NAME"))
     {
         auto tab_it{line_buffer.begin() + line_buffer.find('\t')};
         std::string_view const id_value{line_buffer.begin() + 1 /* skip # */, tab_it};
@@ -95,34 +105,39 @@ auto create_truth_maps(std::filesystem::path const truth_file)
 
     std::cout << "[Truth] Parse results ..." << std::endl;
     std::vector<uint64_t> result_user_bins;
+    size_t count{};
+    size_t all{10000000};
     while (std::getline(truth_file_in, line_buffer))
     {
         result_user_bins.clear();
 
+        // -----------------------------------------------------------------
+        // DEBUG OUTPUT
+        print_progress(count, all);
+        // -----------------------------------------------------------------
+
         auto tab_it{line_buffer.begin() + line_buffer.find('\t')};
-        std::string_view const id{line_buffer.begin(), tab_it};
+        std::string const id{line_buffer.begin(), tab_it};
         std::string_view const bins{++tab_it, line_buffer.end()};
 
         for (auto && user_bin : bins | std::views::split(','))
         {
-#if RAPTOR_IS_GCC12
-            std::string_view ub(user_bin.begin(), user_bin.end());
-#else
+            // std::string_view id_value(user_bin.begin(), user_bin.end()); // doesn't work??
             std::string ub;
             for (char const chr : user_bin)
                 ub.push_back(chr);
-#endif
 
             std::from_chars(ub.data(), ub.data() + ub.size(), buffer);
             result_user_bins.push_back(buffer);
         }
 
-        std::ranges::sort(result_user_bins);
+        std::sort(result_user_bins.begin(), result_user_bins.end());
 
-        hit_map.emplace(id, result_user_bins);
+        hit_map[id] = result_user_bins;
+        ++count;
     }
 
-    std::cout << "Hit map contains " << hit_map.size() << " entries.\n";
+    std::cout << std::endl << "Hit map contains " << hit_map.size() << " entries." << std::endl;
 
     return std::make_pair(ub_name_to_id, hit_map);
 }
@@ -156,13 +171,11 @@ std::pair<size_t, size_t> compare_result_vectors(std::vector<uint64_t> const & t
             }
         }
     }
-
     while (truth_hit != truth.end())
     {
         ++FNS;
         ++truth_hit;
     }
-
     while (result_hit != result.end())
     {
         ++FPS;
@@ -179,23 +192,23 @@ void print_result(size_t const FPS, size_t const FNS)
     std::cout << "FNs " << FNS << std::endl;
     std::cout << std::endl;
 
+    double const ALL = 25321.0 * 10012324.0;
     // ALL_P was obtained by counting hits in truth file
     // /project/archive-index-data/smehringer/raptor_bench/the_one_and_only.truth
-    static constexpr size_t ALL = 25'321ULL * 10'012'324ULL;
-    static constexpr size_t ALL_P = 855'109'966ULL; // TP + FN
-    static constexpr size_t ALL_N = ALL - ALL_P;    // FP + TN
+    double const ALL_P = 855109966.0; // TP + FN
+    double const ALL_N = ALL - ALL_P; // FP + TN
 
-    size_t const TP = ALL_P - FNS;
-    size_t const TN = ALL_N - FPS;
-    size_t const PP = ALL_P - FNS + FPS;
+    double const TP = ALL_P - FNS;
+    double const TN = ALL_N - FPS;
+    double const PP = ALL_P - FNS + FPS;
 
     double const accuracy = ((TP + TN) * 100.0) / ALL;
-    double const fpr = static_cast<double>(FPS) / ALL_N;
-    double const fdr = static_cast<double>(FPS) / PP; // FPS / (All hits recorded as true by tool)
-    double const sensitivity = static_cast<double>(TP) / ALL_P;
-    double const precision = static_cast<double>(TP) / PP; // FPS / (All hits recorded as true by tool)
-    double const specificity = static_cast<double>(TN) / ALL_N;
-    double const f1s = (2.0 * TP) / (2 * TP + FPS + FNS);
+    double const fpr = FPS / ALL_N;
+    double const fdr = FPS / PP; // FPS / (All hits recorded as true by tool)
+    double const sensitivity = TP / ALL_P;
+    double const precision = TP / PP; // FPS / (All hits recorded as true by tool)
+    double const specificity = TN / ALL_N;
+    double const f1s = (2 * TP) / (2* TP + FPS + FNS);
 
     std::cout << "Accuracy " << accuracy << std::endl;
     std::cout << "FPR " << fpr << std::endl;
@@ -206,31 +219,11 @@ void print_result(size_t const FPS, size_t const FNS)
     std::cout << "F1 " << f1s << std::endl;
 }
 
-void print_progress(size_t const query_count, size_t const number_of_querries)
-{
-    static constexpr int barWidth = 70;
-    double const progress = static_cast<double>(query_count) / number_of_querries;
-
-    std::cout << "[";
-    int const pos = barWidth * progress;
-    for (int i = 0; i < barWidth; ++i)
-    {
-        if (i < pos)
-            std::cout << "=";
-        else if (i == pos)
-            std::cout << ">";
-        else
-            std::cout << " ";
-    }
-    std::cout << "] " << int(progress * 100.0) << " %\r";
-    std::cout.flush();
-}
-
 // =============================================================================
 // RAPTOR
 // =============================================================================
 
-void compare_raptor_to_truth(std::filesystem::path const & raptor_file_name,
+void compare_raptor_to_truth(std::filesystem::path const raptor_file_name,
                              robin_hood::unordered_map<std::string, uint64_t> const & truth_id_map,
                              robin_hood::unordered_map<std::string, std::vector<uint64_t>> const & hit_map)
 {
@@ -246,8 +239,7 @@ void compare_raptor_to_truth(std::filesystem::path const & raptor_file_name,
 
     std::cout << "[Raptor] Parse header ..." << std::endl;
     // Header first contains parameters starting with "##"
-    while (std::getline(raptor_file_in, raptor_line) && raptor_line.starts_with("##"))
-        ; // skip
+    while (std::getline(raptor_file_in, raptor_line) && raptor_line.starts_with("##")); // skip
 
     // Header contains lines: "some_number <tab> reference_name"
     do
@@ -256,34 +248,29 @@ void compare_raptor_to_truth(std::filesystem::path const & raptor_file_name,
         std::string_view const id_value{raptor_line.begin() + 1 /* skip # */, tab_it};
         std::string_view const name{++tab_it, raptor_line.end()};
         idx_to_id.emplace(id_value, name);
-    }
-    while (std::getline(raptor_file_in, raptor_line) && raptor_line.starts_with("#")
-           && !raptor_line.starts_with("#QUERY_NAME"));
+    } while (std::getline(raptor_file_in, raptor_line) &&
+             raptor_line.starts_with("#") &&
+             !raptor_line.starts_with("#QUERY_NAME"));
 
     assert(raptor_line == "#QUERY_NAME\tUSER_BINS");
 
     std::cout << "[Raptor] Parse results ..." << std::endl;
     std::vector<uint64_t> result_user_bins;
-    std::string id;
-    std::string ub;
     while (std::getline(raptor_file_in, raptor_line))
     {
         // retrieve user bins
         result_user_bins.clear();
 
         auto tab_it{raptor_line.begin() + raptor_line.find('\t')};
-        id.assign(raptor_line.begin(), tab_it);
+        std::string id{raptor_line.begin(), tab_it};
         std::string_view const bins{++tab_it, raptor_line.end()};
 
         for (auto && user_bin : bins | std::views::split(','))
         {
-#if RAPTOR_IS_GCC12
-            ub.assign(user_bin.begin(), user_bin.end());
-#else
-            ub.clear();
+            // std::string_view id_value(user_bin.begin(), user_bin.end()); // doesn't work??
+            std::string ub;
             for (char const chr : user_bin)
                 ub.push_back(chr);
-#endif
 
             // -----------------------------------------------------------------
             // DEBUG OUTPUT
@@ -296,7 +283,7 @@ void compare_raptor_to_truth(std::filesystem::path const & raptor_file_name,
             result_user_bins.push_back(truth_id_map.at(idx_to_id.at(ub)));
         }
 
-        std::ranges::sort(result_user_bins); // compare script afterwards requires sorted UBs
+        std::sort(result_user_bins.begin(), result_user_bins.end()); // compare script afterwards requires sorted UBs
 
         // compare vectors
         compare_result_vectors(hit_map.at(id), result_user_bins, FPS, FNS);
@@ -306,8 +293,9 @@ void compare_raptor_to_truth(std::filesystem::path const & raptor_file_name,
     }
 
     if (query_count != hit_map.size())
-        throw std::runtime_error{"The result file did only contain " + std::to_string(query_count) + "/"
-                                 + std::to_string(hit_map.size()) + " queries."};
+        throw std::runtime_error{"The result file did only contain " +
+                                 std::to_string(query_count) + "/" + std::to_string(hit_map.size()) +
+                                 " queries."};
 
     print_result(FPS, FNS);
 }
@@ -350,6 +338,7 @@ std::vector<std::string> parse_query_names(std::filesystem::path const & query_n
 class thresholder
 {
 private:
+    // size_t const destroyed_kmers{};
     double const percentage{};
 
 public:
@@ -360,26 +349,35 @@ public:
     thresholder & operator=(thresholder &&) = default;
     ~thresholder() = default;
 
-    explicit thresholder(double const perc) : percentage(perc)
+    explicit thresholder(double perc) : percentage(perc)
     {}
 
     [[nodiscard]] constexpr size_t get(size_t const kmer_count) const noexcept
     {
         return static_cast<size_t>(percentage * kmer_count);
     }
+
+    // explicit thresholder(config const & cfg) :
+    //     destroyed_kmers(cfg.number_of_errors * cfg.kmer_size + cfg.threshold_grace)
+    // {}
+
+    // [[nodiscard]] constexpr size_t get(size_t const kmer_count) const noexcept
+    // {
+    //     return (kmer_count > destroyed_kmers) ? (kmer_count - destroyed_kmers) : 0u;
+    // }
 };
 
-void compare_mantis_to_truth(std::filesystem::path const & mantis_file_name,
-                             std::filesystem::path const & query_names_file,
+void compare_mantis_to_truth(std::filesystem::path const mantis_file_name,
+                             std::filesystem::path const query_names_file,
                              double const the_given_threshold,
                              robin_hood::unordered_map<std::string, uint64_t> const & truth_id_map,
                              robin_hood::unordered_map<std::string, std::vector<uint64_t>> const & hit_map)
 {
     std::ifstream mantis_file_in{mantis_file_name};
     std::string mantis_line;
-    size_t query_count{};                             // in the end we will check if all queries are in the file
+    size_t query_count{}; // in the end we will check if all queries are in the file
     thresholder const threshold{the_given_threshold}; // Helper for computing the threshold.
-    size_t mantis_threshold{};                        // Needs to be set for each query.
+    size_t mantis_threshold{};        // Needs to be set for each query.
     size_t current_query_number{};
     std::vector<uint64_t> results;
     std::string ub_name_buffer;
@@ -396,8 +394,8 @@ void compare_mantis_to_truth(std::filesystem::path const & mantis_file_name,
     for (auto && [key, value] : truth_id_map)
     {
         // truth ids: /path/v1/files/GCF_000019125.1_ASM1912v1_genomic.fna.gz
-        std::string_view new_key{key.begin() + key.find_last_of('/') + 1, key.end() - 7};
-        truth_only_filename_id_map.emplace(new_key, value);
+        std::string new_key{key.begin() + key.find_last_of('/') + 1, key.end() - 7};
+        truth_only_filename_id_map[new_key] = value;
     }
     std::cout << truth_only_filename_id_map.begin()->first << std::endl;
 
@@ -420,7 +418,7 @@ void compare_mantis_to_truth(std::filesystem::path const & mantis_file_name,
         // -----------------------------------------------------------------
         // DEBUG OUTPUT
         if (truth_only_filename_id_map.find(ub_name_buffer) == truth_only_filename_id_map.end())
-            std::cout << "ub_name_buffer " << ub_name_buffer << std::endl;
+            std::cout << "ub_name_buffer" << ub_name_buffer << std::endl;
         // -----------------------------------------------------------------
 
         return truth_only_filename_id_map.at(ub_name_buffer);
@@ -438,12 +436,12 @@ void compare_mantis_to_truth(std::filesystem::path const & mantis_file_name,
 
     auto process_results = [&]()
     {
-        std::ranges::sort(results);
+        std::sort(results.begin(), results.end());
 
         // -----------------------------------------------------------------
         // DEBUG OUTPUT
         if (hit_map.find(current_query_name) == hit_map.end())
-            std::cout << "current_query_name " << current_query_name << std::endl;
+            std::cout << "current_query_name" << current_query_name << std::endl;
         // -----------------------------------------------------------------
 
         compare_result_vectors(hit_map.at(current_query_name), results, FPS, FNS);
@@ -488,13 +486,14 @@ void compare_mantis_to_truth(std::filesystem::path const & mantis_file_name,
     process_results();
 
     if (query_count != hit_map.size())
-        throw std::runtime_error{"The result file did only contain " + std::to_string(query_count) + "/"
-                                 + std::to_string(hit_map.size()) + " queries."};
+        throw std::runtime_error{"The result file did only contain " +
+                                 std::to_string(query_count) + "/" + std::to_string(hit_map.size()) +
+                                 " queries."};
 
     print_result(FPS, FNS);
 }
 
-void compare_bifrost_to_truth(std::filesystem::path const & bifrost_file_name,
+void compare_bifrost_to_truth(std::filesystem::path const bifrost_file_name,
                               robin_hood::unordered_map<std::string, uint64_t> const & truth_id_map,
                               robin_hood::unordered_map<std::string, std::vector<uint64_t>> const & hit_map)
 {
@@ -512,7 +511,7 @@ void compare_bifrost_to_truth(std::filesystem::path const & bifrost_file_name,
 
     // ## Bifrost results ##
     // Bifrost outputs a matrix. Column names = user bin id. Row names = query names
-    auto split_line_by_tab_and = [](std::string_view bifrost_line, auto && callback)
+    auto split_line_by_tab_and = [] (std::string_view bifrost_line, auto do_me)
     {
         std::string_view::size_type current_pos = 0;
         std::string_view::size_type tab_pos{bifrost_line.find('\t')};
@@ -520,24 +519,24 @@ void compare_bifrost_to_truth(std::filesystem::path const & bifrost_file_name,
 
         while (tab_pos != std::string_view::npos)
         {
-            auto current = std::string_view(&bifrost_line[current_pos], tab_pos - current_pos);
-            callback(current, column_idx);
+            auto current = std::string(&bifrost_line[current_pos], tab_pos - current_pos);
+            do_me(current, column_idx);
             current_pos = tab_pos + 1;
             tab_pos = bifrost_line.find('\t', current_pos);
             ++column_idx;
         }
         // process last ub
-        auto last = std::string_view(&bifrost_line[current_pos], bifrost_line.size() - current_pos);
-        callback(last, column_idx);
+        auto last = std::string(&bifrost_line[current_pos], bifrost_line.size() - current_pos);
+        do_me(last, column_idx);
     };
 
-    auto parse_header_user_bin_id = [&bifrost_user_bins, &truth_id_map](std::string_view const & sv, size_t idx)
+    auto parse_header_user_bin_id = [&bifrost_user_bins, &truth_id_map] (std::string const & sv, size_t idx)
     {
         if (idx != 0)
         {
             try
             {
-                bifrost_user_bins.push_back(truth_id_map.at(std::string{sv}));
+                bifrost_user_bins.push_back(truth_id_map.at(sv));
             }
             catch (std::exception const & e)
             {
@@ -551,11 +550,11 @@ void compare_bifrost_to_truth(std::filesystem::path const & bifrost_file_name,
         }
     };
 
-    auto insert_if_one = [&results, &bifrost_user_bins](std::string_view sv, size_t idx)
+    auto insert_if_one = [&results, &bifrost_user_bins] (std::string_view sv, size_t idx)
     {
         if (sv == std::string_view{"1"}) // excludes 0 and the first column which is alywas the query name
         {
-            results.push_back(bifrost_user_bins.at(idx));
+            results.push_back(bifrost_user_bins[idx]);
         }
     };
 
@@ -571,7 +570,6 @@ void compare_bifrost_to_truth(std::filesystem::path const & bifrost_file_name,
     assert(truth_id_map.size() + 1 == bifrost_user_bins.size());
     std::cerr << "Successfully parsed Header line ... " << std::endl;
 
-    std::string query_name;
     while (std::getline(bifrost_result_in, line_buffer))
     {
         results.clear();
@@ -579,7 +577,7 @@ void compare_bifrost_to_truth(std::filesystem::path const & bifrost_file_name,
         split_line_by_tab_and(line_buffer, insert_if_one);
 
         std::string_view::size_type tab_pos{line_buffer.find('\t')};
-        query_name.assign(&line_buffer[0], tab_pos);
+        std::string query_name(&line_buffer[0], tab_pos);
 
         compare_result_vectors(hit_map.at(query_name), results, FPS, FNS);
 
@@ -588,17 +586,18 @@ void compare_bifrost_to_truth(std::filesystem::path const & bifrost_file_name,
     }
 
     if (query_count != hit_map.size())
-        throw std::runtime_error{"The result file did only contain " + std::to_string(query_count) + "/"
-                                 + std::to_string(hit_map.size()) + " queries."};
+        throw std::runtime_error{"The result file did only contain " +
+                                 std::to_string(query_count) + "/" + std::to_string(hit_map.size()) +
+                                 " queries."};
 
     print_result(FPS, FNS);
 }
 
-void compare_metagraph_to_truth(std::filesystem::path const & metagraph_file_name,
+void compare_metagraph_to_truth(std::filesystem::path const metagraph_file_name,
                                 robin_hood::unordered_map<std::string, uint64_t> const & truth_id_map,
                                 robin_hood::unordered_map<std::string, std::vector<uint64_t>> const & hit_map)
 {
-    std::cout << "Processing Metagraph results... " << std::endl;
+
     // Process metagraph results
     std::ifstream metagraph_result_in{metagraph_file_name};
     size_t query_count{};
@@ -606,10 +605,18 @@ void compare_metagraph_to_truth(std::filesystem::path const & metagraph_file_nam
     size_t FPS = 0;
     size_t FNS = 0;
 
+    // recreate a new truth_id_map becuase the ids path are from kmc files not the original files
+    robin_hood::unordered_map<std::string, uint64_t> truth_only_filename_id_map;
+
+    for (auto && [key, value] : truth_id_map)
+    {
+        // truth ids: /path/v1/files/GCF_000019125.1_ASM1912v1_genomic.fna.gz
+        std::string new_key{key.begin() + key.find_last_of('/') + 1, key.end() - 7};
+        truth_only_filename_id_map[new_key] = value;
+    }
+
     // Buffers for file I/O
     std::string metagraph_line{};
-    std::string query_name;
-    std::string ub;
 
     while (std::getline(metagraph_result_in, metagraph_line))
     {
@@ -617,36 +624,33 @@ void compare_metagraph_to_truth(std::filesystem::path const & metagraph_file_nam
 
         std::string_view::size_type first_tab{metagraph_line.find('\t')};
         std::string_view::size_type second_tab{metagraph_line.find('\t', first_tab + 1)};
-        query_name.assign(metagraph_line.begin() + first_tab + 1, metagraph_line.begin() + second_tab);
-        std::string_view bins{metagraph_line.begin() + second_tab + 1, metagraph_line.end()};
+        std::string query_name(metagraph_line.begin() + first_tab + 1, metagraph_line.begin() + second_tab);
+        std::string bins{metagraph_line.begin() + second_tab + 1, metagraph_line.end()};
 
         for (auto && user_bin : bins | std::views::split(':'))
         {
-#if RAPTOR_IS_GCC12
-            ub.assign(user_bin.begin(), user_bin.end());
-            ub.resize(ub.find_last_of('.'));
-            ub += "fna.gz";
-#else
-            ub.clear();
+            // std::string_view id_value(user_bin.begin(), user_bin.end()); // doesn't work??
+            std::string ub;
             for (char const chr : user_bin)
                 ub.push_back(chr);
-            ub.resize(ub.find_last_of('.'));
-            ub += "fna.gz";
-#endif
+            std::string ub_filename{ub.begin() + ub.find_last_of('/') + 1, ub.begin() + ub.find_last_of('.')};
 
             // -----------------------------------------------------------------
             // DEBUG OUTPUT
-            if (truth_id_map.find(ub) == truth_id_map.end())
-                std::cout << ub << std::endl;
+            // if (truth_only_filename_id_map.find(ub_filename) == truth_only_filename_id_map.end())
+            // {
+            //     std::cout << truth_only_filename_id_map.begin()->first << std::endl;
+            //     std::cout << "ub_filename" << ub_filename << std::endl;
+            // }
             // -----------------------------------------------------------------
 
-            results.push_back(truth_id_map.at(ub));
+            results.push_back(truth_only_filename_id_map.at(ub_filename));
         }
 
         // -----------------------------------------------------------------
         // DEBUG OUTPUT
-        if (hit_map.find(query_name) == hit_map.end())
-            std::cout << query_name << std::endl;
+        // if (hit_map.find(query_name) == hit_map.end())
+        //     std::cout << query_name << std::endl;
         // -----------------------------------------------------------------
 
         compare_result_vectors(hit_map.at(query_name), results, FPS, FNS);
@@ -656,13 +660,14 @@ void compare_metagraph_to_truth(std::filesystem::path const & metagraph_file_nam
     }
 
     if (query_count != hit_map.size())
-        throw std::runtime_error{"The result file did only contain " + std::to_string(query_count) + "/"
-                                 + std::to_string(hit_map.size()) + " queries."};
+        throw std::runtime_error{"The result file did only contain " +
+                                 std::to_string(query_count) + "/" + std::to_string(hit_map.size()) +
+                                 " queries."};
 
     print_result(FPS, FNS);
 }
 
-void compare_cobs_to_truth(std::filesystem::path const & cobs_file_name,
+void compare_cobs_to_truth(std::filesystem::path const cobs_file_name,
                            robin_hood::unordered_map<std::string, uint64_t> const & truth_id_map,
                            robin_hood::unordered_map<std::string, std::vector<uint64_t>> const & hit_map)
 {
@@ -671,8 +676,8 @@ void compare_cobs_to_truth(std::filesystem::path const & cobs_file_name,
 
     for (auto && [key, value] : truth_id_map)
     {
-        std::string_view new_key{key.begin() + key.find_last_of('/') + 1, key.begin() + key.find('.')};
-        truth_trunc_id_map.emplace(new_key, value);
+        std::string new_key{key.begin() + key.find_last_of('/') + 1, key.begin() + key.find('.')};
+        truth_trunc_id_map[new_key] = value;
     }
 
     std::ifstream cobs_result_in{cobs_file_name};
@@ -682,16 +687,15 @@ void compare_cobs_to_truth(std::filesystem::path const & cobs_file_name,
     size_t FNS = 0;
     std::string cobs_line{};
     std::string current_query_name;
-    std::string ub;
 
-    auto parse_query_name = [&current_query_name](std::string_view const line)
+    auto parse_query_name = [&current_query_name] (std::string_view const line)
     {
-        current_query_name.assign(line.begin() + 1 /* skip * */, line.begin() + line.find('\t'));
+        current_query_name = std::string{line.begin() + 1 /* skip * */, line.begin() + line.find('\t')};
     };
 
     auto process_results = [&]()
     {
-        std::ranges::sort(results);
+        std::sort(results.begin(), results.end());
 
         // -----------------------------------------------------------------
         // DEBUG OUTPUT
@@ -704,9 +708,9 @@ void compare_cobs_to_truth(std::filesystem::path const & cobs_file_name,
         results.clear();
     };
 
-    auto parse_user_bin_id = [&truth_trunc_id_map, &ub](std::string_view const line)
+    auto parse_user_bin_id = [&truth_trunc_id_map](std::string_view const line)
     {
-        ub.assign(line.begin(), line.begin() + line.find('\t'));
+        std::string ub{line.begin(), line.begin() + line.find('\t')};
 
         // -----------------------------------------------------------------
         // DEBUG OUTPUT
@@ -756,8 +760,9 @@ void compare_cobs_to_truth(std::filesystem::path const & cobs_file_name,
     ++query_count;
 
     if (query_count != hit_map.size())
-        throw std::runtime_error{"The result file did only contain " + std::to_string(query_count) + "/"
-                                 + std::to_string(hit_map.size()) + " queries."};
+        throw std::runtime_error{"The result file did only contain " +
+                                 std::to_string(query_count) + "/" + std::to_string(hit_map.size()) +
+                                 " queries."};
 
     print_result(FPS, FNS);
 }
@@ -784,10 +789,11 @@ int main(int argc, char ** argv)
 
         if (options.result_format == "mantis" && options.mantis_threshold == -1.0)
             throw sharg::parser_error{"For mantis results you need to pass the threshold."};
+
     }
     catch (sharg::parser_error const & ext)
     {
-        std::cerr << "[Error] " << ext.what() << std::endl;
+        std::cerr << "[Error] " << ext.what() << '\n';
         std::exit(-1);
     }
 
@@ -799,11 +805,7 @@ int main(int argc, char ** argv)
     if (options.result_format == "raptor")
         compare_raptor_to_truth(options.result_file, id_map, hit_map);
     else if (options.result_format == "mantis")
-        compare_mantis_to_truth(options.result_file,
-                                options.mantis_query_names,
-                                options.mantis_threshold,
-                                id_map,
-                                hit_map);
+        compare_mantis_to_truth(options.result_file, options.mantis_query_names, options.mantis_threshold, id_map, hit_map);
     else if (options.result_format == "bifrost")
         compare_bifrost_to_truth(options.result_file, id_map, hit_map);
     else if (options.result_format == "metagraph")
